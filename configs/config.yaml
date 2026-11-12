@@ -1,0 +1,19 @@
+data:
+  raw_dir: data/raw            # aquí se descomprime el dataset de Kaggle (y luego sus fotos propias)
+  processed_dir: data/processed
+  split: {train: 0.70, val: 0.15, test: 0.15}
+  seed: 42
+
+model:
+  arch: mobilenet_v3_large     # opciones: mobilenet_v3_large, efficientnet_b0, resnet50
+  img_size: 224
+  pretrained: true
+
+train:
+  epochs: 10
+  batch_size: 32
+  lr: 0.001                    # escríbelo así; PyYAML lee "1e-3" como texto
+  weight_decay: 0.0001
+  freeze_epochs: 2             # épocas iniciales entrenando solo la cabeza
+  num_workers: 4
+  out_dir: models

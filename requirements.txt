@@ -1,0 +1,16 @@
+# --- Núcleo de ML ---
+# Para GPU NVIDIA instala torch/torchvision primero con el comando de https://pytorch.org
+# (ej. --index-url https://download.pytorch.org/whl/cu121) y luego el resto.
+torch>=2.3
+torchvision>=0.18
+
+# --- Datos y utilidades ---
+pillow>=10.0
+numpy>=1.26
+pyyaml>=6.0
+tqdm>=4.66
+scikit-learn>=1.4
+matplotlib>=3.8
+
+# --- Descarga del dataset ---
+kaggle>=1.6
