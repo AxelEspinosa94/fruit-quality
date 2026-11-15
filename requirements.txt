@@ -13,4 +13,5 @@ scikit-learn>=1.4
 matplotlib>=3.8
 
 # --- Descarga del dataset ---
-kaggle>=1.6
+kaggle>=1.6.17
+six>=1.16

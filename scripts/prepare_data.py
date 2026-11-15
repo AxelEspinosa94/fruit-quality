@@ -7,6 +7,7 @@ así que puedes agregar fotos propias en data/raw/propias/<clase>/ y se mezclan 
 Uso: python scripts/prepare_data.py [--config configs/config.yaml]
 """
 import argparse
+import hashlib
 import random
 import shutil
 from collections import defaultdict
@@ -28,16 +29,36 @@ def collect(raw_dir: Path) -> dict[str, list[Path]]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/config.yaml")
+    ap.add_argument("--raw-dir", nargs="+", default=None,
+                    help="una o varias carpetas de origen (sobrescribe raw_dir del config); "
+                         "ej. en Kaggle: /kaggle/input/<dataset> data/raw/propias")
     args = ap.parse_args()
     cfg = load_config(args.config)["data"]
 
-    raw, out = Path(cfg["raw_dir"]), Path(cfg["processed_dir"])
+    raw_dirs = [Path(p) for p in (args.raw_dir or [cfg["raw_dir"]])]
+    out = Path(cfg["processed_dir"])
     split = cfg["split"]
     rng = random.Random(cfg["seed"])
 
-    by_class = collect(raw)
+    by_class: dict[str, list[Path]] = defaultdict(list)
+    for raw in raw_dirs:
+        for cls, files in collect(raw).items():
+            by_class[cls] += files
     if not by_class:
-        raise SystemExit(f"No encontré imágenes en {raw}. ¿Corriste download_data.sh?")
+        raise SystemExit(f"No encontré imágenes en {raw_dirs}. ¿Corriste download_data.sh?")
+
+    # Quita duplicados exactos (mismo contenido) para que no caigan en train y test a la vez
+    seen: set[str] = set()
+    for cls in by_class:
+        unique = []
+        for p in sorted(by_class[cls]):
+            h = hashlib.md5(p.read_bytes()).hexdigest()
+            if h not in seen:
+                seen.add(h)
+                unique.append(p)
+        if len(unique) < len(by_class[cls]):
+            print(f"{cls}: {len(by_class[cls]) - len(unique)} duplicados eliminados")
+        by_class[cls] = unique
 
     for part in ("train", "val", "test"):  # borra splits previos, conserva .gitkeep
         if (out / part).exists():
