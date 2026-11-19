@@ -11,3 +11,5 @@ data/processed/*
 !data/processed/.gitkeep
 models/*
 !models/.gitkeep
+
+data/propias/
