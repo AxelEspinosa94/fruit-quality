@@ -1,7 +1,7 @@
 data:
   raw_dir: data/raw            # aquí se descomprime el dataset de Kaggle (y luego sus fotos propias)
-  processed_dir: data/processed
-  split: {train: 0.70, val: 0.15, test: 0.15}
+  processed_dir: data/processed_combined
+  split: {train: 0.85, val: 0.15, test: 0.0}
   seed: 42
 
 model:
@@ -11,9 +11,17 @@ model:
 
 train:
   epochs: 15
-  batch_size: 8
+  batch_size: 32
   lr: 0.001                    # escríbelo así; PyYAML lee "1e-3" como texto
   weight_decay: 0.0001
   freeze_epochs: 2             # épocas iniciales entrenando solo la cabeza
+  stage2_until: 5
+
+  backbone_lr: 0.0001
+  head_lr_stage2: 0.0003
+
+  fine_tune_lr: 0.00005
+  head_lr_stage3: 0.0001
   num_workers: 0
-  out_dir: models
+  out_dir: models/gradual
+  device_index: 1
