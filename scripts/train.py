@@ -20,8 +20,9 @@ from fruitq.config import load_config
 from fruitq.data import make_loader
 from fruitq.model import (
     build_model,
-    set_backbone_trainable
+    set_trainable_stage
 )
+
 
 
 def run_epoch(model, loader, criterion, device, optimizer=None):
@@ -29,6 +30,13 @@ def run_epoch(model, loader, criterion, device, optimizer=None):
     training = optimizer is not None
 
     model.train(training)
+
+    # Evitar actualizar estadísticas BatchNorm
+    # durante el fine-tuning con lotes pequeños.
+    if training:
+        for module in model.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.eval()
 
     total_loss = 0.0
     correct = 0
@@ -45,16 +53,14 @@ def run_epoch(model, loader, criterion, device, optimizer=None):
             x = x.to(device)
             y = y.to(device)
 
-            logits = model(x)
+            if training:
+                optimizer.zero_grad()
 
+            logits = model(x)
             loss = criterion(logits, y)
 
             if training:
-
-                optimizer.zero_grad()
-
                 loss.backward()
-
                 optimizer.step()
 
             total_loss += loss.item() * x.size(0)
@@ -66,6 +72,59 @@ def run_epoch(model, loader, criterion, device, optimizer=None):
             n += x.size(0)
 
     return total_loss / n, correct / n
+
+
+def build_optimizer(model, arch, stage, tcfg):
+
+    head = list(
+        model.fc.parameters()
+        if arch == "resnet50"
+        else model.classifier.parameters()
+    )
+
+    head_ids = {id(p) for p in head}
+
+    backbone = [
+        p for p in model.parameters()
+        if p.requires_grad and id(p) not in head_ids
+    ]
+
+    if stage == 1:
+        groups = [
+            {
+                "params": head,
+                "lr": tcfg["lr"]
+            }
+        ]
+
+    elif stage == 2:
+        groups = [
+            {
+                "params": backbone,
+                "lr": tcfg.get("backbone_lr", 0.0001)
+            },
+            {
+                "params": head,
+                "lr": tcfg.get("head_lr_stage2", 0.0003)
+            }
+        ]
+
+    else:
+        groups = [
+            {
+                "params": backbone,
+                "lr": tcfg.get("fine_tune_lr", 0.00005)
+            },
+            {
+                "params": head,
+                "lr": tcfg.get("head_lr_stage3", 0.0001)
+            }
+        ]
+
+    return torch.optim.AdamW(
+        groups,
+        weight_decay=tcfg["weight_decay"]
+    )
 
 
 def main():
@@ -86,7 +145,11 @@ def main():
     tcfg = cfg["train"]
 
     # Dispositivo DirectML
-    device = torch_directml.device()
+    device_index = tcfg.get("device_index", 1)
+    device = torch_directml.device(device_index)
+
+    print(f"GPU seleccionada: DirectML {device_index}")
+    print(f"Dispositivo: {torch_directml.device_name(device_index)}")
 
     torch.manual_seed(dcfg["seed"])
 
@@ -153,33 +216,49 @@ def main():
     history = []
 
     optimizer = None
+    current_stage = None
 
     for epoch in range(1, tcfg["epochs"] + 1):
 
-        frozen = epoch <= tcfg["freeze_epochs"]
+        if epoch <= tcfg["freeze_epochs"]:
+            stage = 1
 
-        if epoch == 1 or epoch == tcfg["freeze_epochs"] + 1:
+        elif epoch <= tcfg["stage2_until"]:
+            stage = 2
 
-            set_backbone_trainable(
+        else:
+            stage = 3
+
+        if stage != current_stage:
+
+            set_trainable_stage(
                 model,
                 mcfg["arch"],
-                trainable=not frozen
+                stage
             )
 
-            lr = (
-                tcfg["lr"]
-                if frozen
-                else tcfg["lr"] * 0.1
+            optimizer = build_optimizer(
+                model,
+                mcfg["arch"],
+                stage,
+                tcfg
             )
 
-            optimizer = torch.optim.AdamW(
-                (
-                    p for p in model.parameters()
+            current_stage = stage
+
+            print(f"\nCambio a etapa {stage}")
+
+            print(
+                "Parámetros entrenables:",
+                sum(
+                    p.numel()
+                    for p in model.parameters()
                     if p.requires_grad
-                ),
-                lr=lr,
-                weight_decay=tcfg["weight_decay"]
+                )
             )
+
+        print(f"\nÉpoca {epoch}/{tcfg['epochs']} - Etapa {stage}")
+
 
         tr_loss, tr_acc = run_epoch(
             model,
@@ -206,7 +285,7 @@ def main():
 
         print(
             f"[{epoch:02d}/{tcfg['epochs']}] "
-            f"{'(cabeza)' if frozen else '(completo)'} "
+            f"{'(solo cabeza)' if stage == 1 else '(fine-tuning)'} "
             f"train_loss={tr_loss:.4f} "
             f"train_acc={tr_acc:.4f} "
             f"val_loss={va_loss:.4f} "
