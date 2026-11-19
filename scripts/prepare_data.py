@@ -1,85 +1,171 @@
-"""Junta todas las carpetas de clase en data/raw y genera un split estratificado
-train/val/test en data/processed.
-
-La clase de cada imagen es el nombre de la carpeta que la contiene (en minúsculas),
-así que puedes agregar fotos propias en data/raw/propias/<clase>/ y se mezclan solas.
-
-Uso: python scripts/prepare_data.py [--config configs/config.yaml]
+"""Combina Kaggle Train + Mendeley, conserva Kaggle Test y elimina
+duplicados exactos de Mendeley contra todo Kaggle y entre sí.
 """
 import argparse
 import hashlib
 import random
 import shutil
-from collections import defaultdict
 from pathlib import Path
 
 from fruitq.config import load_config
 
-IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+CLASSES = [
+    "freshapples",
+    "freshbanana",
+    "freshoranges",
+    "rottenapples",
+    "rottenbanana",
+    "rottenoranges",
+]
 
 
-def collect(raw_dir: Path) -> dict[str, list[Path]]:
-    by_class: dict[str, list[Path]] = defaultdict(list)
-    for p in raw_dir.rglob("*"):
-        if p.is_file() and p.suffix.lower() in IMG_EXT:
-            by_class[p.parent.name.lower()].append(p)
-    return by_class
+def images_in(folder: Path) -> list[Path]:
+    if not folder.is_dir():
+        raise SystemExit(f"No existe la carpeta: {folder}")
+
+    return sorted(
+        p for p in folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in EXTENSIONS
+    )
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def copy_images(files: list[Path], destination: Path, prefix: str):
+    destination.mkdir(parents=True, exist_ok=True)
+
+    for index, source in enumerate(files):
+        target = destination / f"{prefix}_{index:05d}{source.suffix.lower()}"
+        shutil.copy2(source, target)
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/config.yaml")
-    ap.add_argument("--raw-dir", nargs="+", default=None,
-                    help="una o varias carpetas de origen (sobrescribe raw_dir del config); "
-                         "ej. en Kaggle: /kaggle/input/<dataset> data/raw/propias")
-    args = ap.parse_args()
-    cfg = load_config(args.config)["data"]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/config.yaml")
+    parser.add_argument("--output", default="data/processed_combined")
+    args = parser.parse_args()
 
-    raw_dirs = [Path(p) for p in (args.raw_dir or [cfg["raw_dir"]])]
-    out = Path(cfg["processed_dir"])
-    split = cfg["split"]
-    rng = random.Random(cfg["seed"])
+    cfg = load_config(args.config)
+    seed = cfg["data"].get("seed", 42)
 
-    by_class: dict[str, list[Path]] = defaultdict(list)
-    for raw in raw_dirs:
-        for cls, files in collect(raw).items():
-            by_class[cls] += files
-    if not by_class:
-        raise SystemExit(f"No encontré imágenes en {raw_dirs}. ¿Corriste download_data.sh?")
+    kaggle = Path("data/raw/dataset")
+    kaggle_train = kaggle / "train"
+    kaggle_test = kaggle / "test"
+    mendeley = Path("data/raw/mendeley/images")
+    output = Path(args.output)
 
-    # Quita duplicados exactos (mismo contenido) para que no caigan en train y test a la vez
-    seen: set[str] = set()
-    for cls in by_class:
-        unique = []
-        for p in sorted(by_class[cls]):
-            h = hashlib.md5(p.read_bytes()).hexdigest()
-            if h not in seen:
-                seen.add(h)
-                unique.append(p)
-        if len(unique) < len(by_class[cls]):
-            print(f"{cls}: {len(by_class[cls]) - len(unique)} duplicados eliminados")
-        by_class[cls] = unique
+    print("===== VALIDANDO DATASETS =====")
 
-    for part in ("train", "val", "test"):  # borra splits previos, conserva .gitkeep
-        if (out / part).exists():
-            shutil.rmtree(out / part)
+    # Leer Kaggle y registrar hashes de Train y Test.
+    kaggle_files = {}
+    known_hashes = {}
 
-    for cls, files in sorted(by_class.items()):
-        files = sorted(files)
-        rng.shuffle(files)
-        n = len(files)
-        n_train, n_val = int(n * split["train"]), int(n * split["val"])
-        parts = {
-            "train": files[:n_train],
-            "val": files[n_train:n_train + n_val],
-            "test": files[n_train + n_val:],
-        }
-        for part, items in parts.items():
-            dst = out / part / cls
-            dst.mkdir(parents=True, exist_ok=True)
-            for i, src in enumerate(items):
-                shutil.copy2(src, dst / f"{i:05d}{src.suffix.lower()}")
-        print(f"{cls:20s} total={n:5d}  " + "  ".join(f"{k}={len(v)}" for k, v in parts.items()))
+    for cls in CLASSES:
+        train_files = images_in(kaggle_train / cls)
+        test_files = images_in(kaggle_test / cls)
+
+        if not train_files or not test_files:
+            raise SystemExit(f"Faltan imágenes de Kaggle para: {cls}")
+
+        kaggle_files[cls] = (train_files, test_files)
+
+        for path in train_files + test_files:
+            known_hashes.setdefault(sha256(path), cls)
+
+        print(
+            f"{cls:16s} Kaggle Train={len(train_files):4d} "
+            f"Kaggle Test={len(test_files):4d}"
+        )
+
+    # Incorporar únicamente imágenes Mendeley no duplicadas.
+    mendeley_unique = {}
+    duplicates = 0
+
+    for cls in CLASSES:
+        accepted = []
+
+        for path in images_in(mendeley / cls):
+            digest = sha256(path)
+
+            if digest in known_hashes:
+                duplicates += 1
+                continue
+
+            known_hashes[digest] = cls
+            accepted.append(path)
+
+        mendeley_unique[cls] = accepted
+
+    print(f"\nDuplicados Mendeley descartados: {duplicates}")
+
+    # Preparar una salida nueva, sin tocar data/processed ni models/best.pt.
+    if output.exists():
+        shutil.rmtree(output)
+
+    rng = random.Random(seed)
+    print(f"\n===== GENERANDO {output} =====")
+
+    total_train = total_val = total_test = 0
+
+    for cls in CLASSES:
+        kaggle_train_files, kaggle_test_files = kaggle_files[cls]
+        combined = [
+            (path, "kaggle") for path in kaggle_train_files
+        ] + [
+            (path, "mendeley") for path in mendeley_unique[cls]
+        ]
+
+        rng.shuffle(combined)
+
+        # 85 % entrenamiento y 15 % validación.
+        val_count = max(1, round(len(combined) * 0.15))
+        train_items = combined[val_count:]
+        val_items = combined[:val_count]
+
+        train_dir = output / "train" / cls
+        val_dir = output / "val" / cls
+        test_dir = output / "test" / cls
+
+        train_dir.mkdir(parents=True, exist_ok=True)
+        val_dir.mkdir(parents=True, exist_ok=True)
+
+        for index, (source, origin) in enumerate(train_items):
+            target = train_dir / f"{origin}_{index:05d}{source.suffix.lower()}"
+            shutil.copy2(source, target)
+
+        for index, (source, origin) in enumerate(val_items):
+            target = val_dir / f"{origin}_{index:05d}{source.suffix.lower()}"
+            shutil.copy2(source, target)
+
+        # Test es exactamente el conjunto de prueba original de Kaggle.
+        copy_images(kaggle_test_files, test_dir, "kaggle_test")
+
+        total_train += len(train_items)
+        total_val += len(val_items)
+        total_test += len(kaggle_test_files)
+
+        print(
+            f"{cls:16s} "
+            f"train={len(train_items):4d} "
+            f"val={len(val_items):4d} "
+            f"test={len(kaggle_test_files):4d} "
+            f"(Mendeley incorporadas={len(mendeley_unique[cls])})"
+        )
+
+    print("\n===== RESUMEN =====")
+    print("Train:", total_train)
+    print("Val:  ", total_val)
+    print("Test: ", total_test)
+    print("Total:", total_train + total_val + total_test)
+    print("Salida:", output.resolve())
 
 
 if __name__ == "__main__":
