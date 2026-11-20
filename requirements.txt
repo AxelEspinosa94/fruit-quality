@@ -1,8 +1,9 @@
 # --- Núcleo de ML ---
 # Para GPU NVIDIA instala torch/torchvision primero con el comando de https://pytorch.org
 # (ej. --index-url https://download.pytorch.org/whl/cu121) y luego el resto.
-torch>=2.3
-torchvision>=0.18
+torch>=2.4.1
+torchvision>=0.19.1
+torch-directml==0.2.5.dev240914
 
 # --- Datos y utilidades ---
 pillow>=10.0
